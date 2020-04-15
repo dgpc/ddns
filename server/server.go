@@ -3,7 +3,6 @@ package server
 import (
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -31,7 +30,6 @@ func UpdateHandler(w http.ResponseWriter, r *http.Request) {
 	verbose := r.FormValue("verbose") == "true"
 	// clear := r.FormValue("clear") == "true"
 	if domain == "" {
-		log.Println("attempt legacy no-parameter request")
 		v := mux.Vars(r)
 		domain = v["domain"]
 		token = v["token"]
