@@ -6,7 +6,7 @@ import (
 )
 
 func TestUpdateValidation(t *testing.T) {
-	h := Router()
+	srv := NewServer(nil)
 	for name, tc := range map[string]struct {
 		url    string
 		status int
@@ -33,7 +33,7 @@ func TestUpdateValidation(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			req := httptest.NewRequest("GET", tc.url, nil)
 			w := httptest.NewRecorder()
-			h.ServeHTTP(w, req)
+			srv.Router.ServeHTTP(w, req)
 			status := w.Result().StatusCode
 			if status != tc.status {
 				t.Errorf("unexpected status code, got %d, want %d", status, tc.status)

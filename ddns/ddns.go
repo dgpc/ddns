@@ -2,7 +2,6 @@ package ddns
 
 import (
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -11,24 +10,40 @@ import (
 
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
+	"google.golang.org/api/dns/v1"
 )
 
-func Router() *mux.Router {
-	r := mux.NewRouter()
-	r.HandleFunc("/update", UpdateHandler)
-	r.HandleFunc("/update/{domain}/{token}", UpdateHandler)
-	r.HandleFunc("/update/{domain}/{token}/{ip}", UpdateHandler)
-	r.Use(handlers.ProxyHeaders)
-	return r
+type server struct {
+	dnsService *dns.Service
+	Router     *mux.Router
 }
 
-func UpdateHandler(w http.ResponseWriter, r *http.Request) {
+func NewServer(dnsService *dns.Service) *server {
+	srv := &server{
+		dnsService: dnsService,
+	}
+
+	r := mux.NewRouter()
+	r.HandleFunc("/update", srv.UpdateHandler)
+	r.HandleFunc("/update/{domain}/{token}", srv.UpdateHandler)
+	r.HandleFunc("/update/{domain}/{token}/{ip}", srv.UpdateHandler)
+	r.Use(handlers.ProxyHeaders)
+	srv.Router = r
+
+	return srv
+}
+func (srv *server) UpdateHandler(w http.ResponseWriter, r *http.Request) {
 	domain := r.FormValue("domains")
 	token := r.FormValue("token")
 	ip := r.FormValue("ip")
 	ipv6 := r.FormValue("ipv6")
 	verbose := r.FormValue("verbose") == "true"
-	// clear := r.FormValue("clear") == "true"
+    clear := r.FormValue("clear") == "true"
+    if clear {
+        ip = ""
+        ipv6 = ""
+    }
+    
 	if domain == "" {
 		v := mux.Vars(r)
 		domain = v["domain"]
@@ -41,29 +56,30 @@ func UpdateHandler(w http.ResponseWriter, r *http.Request) {
 
 	if len(domains) == 0 {
 		w.WriteHeader(http.StatusBadRequest)
-		io.WriteString(w, "KO\n")
+		fmt.Fprintf(w, "KO\n")
 		if verbose {
-			io.WriteString(w, "no domain(s) provided\n")
+			fmt.Fprintf(w, "no domain(s) provided\n")
 		}
 		return
 	}
 
-	for _, domain := range domains {
+	for i, domain := range domains {
 		if !netutil.IsDomainName(domain) {
 			w.WriteHeader(http.StatusBadRequest)
-			io.WriteString(w, "KO\n")
+			fmt.Fprintf(w, "KO\n")
 			if verbose {
-				io.WriteString(w, fmt.Sprintf("invalid domain: %q\n", domain))
+				fmt.Fprintf(w, "invalid domain: %q\n", domain)
 			}
 			return
 		}
+		domains[i] = netutil.AbsDomainName([]byte(domain))
 	}
 
 	if token != "hunter2" { // TODO: auth
 		w.WriteHeader(http.StatusUnauthorized)
-		io.WriteString(w, "KO\n")
+		fmt.Fprintf(w, "KO\n")
 		if verbose {
-			io.WriteString(w, "token should be 'hunter2' 🙈\n")
+			fmt.Fprintf(w, "token should be 'hunter2' 🙈\n")
 		}
 		return
 	}
@@ -73,9 +89,9 @@ func UpdateHandler(w http.ResponseWriter, r *http.Request) {
 		ip = r.RemoteAddr
 		if ip == "" {
 			w.WriteHeader(http.StatusInternalServerError)
-			io.WriteString(w, "KO\n")
+			fmt.Fprintf(w, "KO\n")
 			if verbose {
-				io.WriteString(w, "unable to determine client IP address\n")
+				fmt.Fprintf(w, "unable to determine client IP address\n")
 			}
 			return
 		}
@@ -88,23 +104,14 @@ func UpdateHandler(w http.ResponseWriter, r *http.Request) {
 		// Validate explicit IPv6 address
 		parsedIP := net.ParseIP(ipv6)
 		if parsedIP == nil {
+			// consider http.Error()
 			w.WriteHeader(http.StatusBadRequest)
-			io.WriteString(w, "KO\n")
+			fmt.Fprintf(w, "KO\n")
 			if verbose {
-				io.WriteString(w, fmt.Sprintf("invalid IP v6 address: %q\n", ipv6))
+				fmt.Fprintf(w, "invalid IP v6 address: %q\n", ipv6)
 			}
 			return
 		}
-
-		// TODO: removed this check since it breaks valid 4-to-6 addresses in the 0:0:0:0:0:ffff:* range
-		// if parsedIP.To4() != nil {
-		// 	w.WriteHeader(http.StatusBadRequest)
-		// 	io.WriteString(w, "KO\n")
-		// 	if verbose {
-		// 		io.WriteString(w, fmt.Sprintf("IPv4 address provided in IPv6 field: %q\n", ipv6))
-		// 	}
-		// 	return
-		// }
 	}
 
 	if ipv6 == "" {
@@ -112,9 +119,9 @@ func UpdateHandler(w http.ResponseWriter, r *http.Request) {
 		parsedIP := net.ParseIP(ip)
 		if parsedIP == nil {
 			w.WriteHeader(http.StatusBadRequest)
-			io.WriteString(w, "KO\n")
+			fmt.Fprintf(w, "KO\n")
 			if verbose {
-				io.WriteString(w, fmt.Sprintf("invalid IP address: %q\n", ip))
+				fmt.Fprintf(w, "invalid IP address: %q\n", ip)
 			}
 			return
 		}
@@ -124,11 +131,25 @@ func UpdateHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	err, changed := srv.updateZone(r.Context(), domains, ip, ipv6, clear)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "KO\n")
+		if verbose {
+			fmt.Fprintf(w, "failed to update zone file: %v\n", err)
+		}
+		return
+	}
+
 	w.WriteHeader(http.StatusOK)
-	io.WriteString(w, "OK\n")
+	fmt.Fprintf(w, "OK\n")
 	if verbose {
-		io.WriteString(w, ip+"\n")
-		io.WriteString(w, ipv6+"\n")
-		io.WriteString(w, "UPDATED\n") // or NOCHANGE
+		fmt.Fprintf(w, "%s\n", ip)
+		fmt.Fprintf(w, "%s\n", ipv6)
+		if changed {
+			fmt.Fprintf(w, "UPDATED\n")
+		} else {
+			fmt.Fprintf(w, "NOCHANGE\n")
+		}
 	}
 }
