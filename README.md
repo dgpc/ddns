@@ -9,7 +9,7 @@ soley by David Claridge, and not in association with his employment at Google.
 
 1. Clone this GitHub repository.
 1. Change the `project` and `zone` constants in `ddns/google.go`.
-1. Build using `docker build -t gcr.io/<project>/ddns-server:latest .
+1. Build using `docker build -t gcr.io/<project>/ddns-server:latest` .
 1. Push the image to GCR.
 1. Create the Cloud Run applicable.
 
@@ -22,3 +22,4 @@ Unfinished work includes:
 * Implementing authentication.
 * Moving project/zone configuration to environment variables.
 * Supporting multiple users/zones.
+* Listening based on the `PORT` environment variable, rather than a constant `8080`.
