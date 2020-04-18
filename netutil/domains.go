@@ -3,6 +3,7 @@
 // license that can be found in the LICENSE file.
 
 package netutil
+
 // isDomainName & absDomainName: cribbed from  golang.org/src/net/dnsclient.go
 
 // IsDomainName checks if a string is a presentation-format domain name
