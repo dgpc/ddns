@@ -41,6 +41,8 @@ func NewServer(dnsService *dns.Service) *server {
 
 	r := mux.NewRouter()
 	r.HandleFunc("/update", srv.UpdateHandler)
+	r.HandleFunc("/nic/update", srv.UpdateHandler)
+	r.HandleFunc("/dyn/dyndns.php", srv.UpdateHandler)
 	r.HandleFunc("/update/{domain}/{token}", srv.UpdateHandler)
 	r.HandleFunc("/update/{domain}/{token}/{ip}", srv.UpdateHandler)
 	r.Use(handlers.ProxyHeaders)
@@ -48,18 +50,31 @@ func NewServer(dnsService *dns.Service) *server {
 
 	return srv
 }
+
+func any(ss ...string) string {
+	for _, s := range ss {
+		if s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
 func (srv *server) UpdateHandler(w http.ResponseWriter, r *http.Request) {
-	domain := r.FormValue("domains")
+	domain := any(r.FormValue("domains"), r.FormValue("hostname"))
 	token := r.FormValue("token")
-	ip := r.FormValue("ip")
+	if _, pass, ok := r.BasicAuth(); ok && token == "" {
+		token = pass
+	}
+	ip := any(r.FormValue("ip"), r.FormValue("myip"))
 	ipv6 := r.FormValue("ipv6")
 	verbose := r.FormValue("verbose") == "true"
-    clear := r.FormValue("clear") == "true"
-    if clear {
-        ip = ""
-        ipv6 = ""
-    }
-    
+	clear := r.FormValue("clear") == "true"
+	if clear {
+		ip = ""
+		ipv6 = ""
+	}
+
 	if domain == "" {
 		v := mux.Vars(r)
 		domain = v["domain"]
