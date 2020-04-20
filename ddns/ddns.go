@@ -22,7 +22,7 @@ import (
 	"net/http"
 	"strings"
 
-	"ddns/netutil"
+	"ddns/third_party/netutil"
 
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
