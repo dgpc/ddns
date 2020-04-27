@@ -27,6 +27,7 @@ import (
 
 	"ddns/ddns"
 
+	"cloud.google.com/go/datastore"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/dns/v1"
 )
@@ -43,8 +44,12 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	dsCli, err := datastore.NewClient(context.Background(), ddns.Project)
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	ddnsServer := ddns.NewServer(dnsService)
+	ddnsServer := ddns.NewServer(dnsService, dsCli)
 	srv := &http.Server{Addr: ":8080", Handler: ddnsServer.Router}
 
 	go func() {

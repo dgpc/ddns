@@ -23,12 +23,12 @@ import (
 )
 
 const (
-	project = "c6eme-42"
+	Project = "c6eme-42"
 	zone    = "c6e"
 )
 
 func (s *server) updateZone(ctx context.Context, domains []string, ip, ipv6 string, clear bool) (err error, changed bool) {
-	resp, err := s.dnsService.ResourceRecordSets.List(project, zone).Context(ctx).Do()
+	resp, err := s.dnsService.ResourceRecordSets.List(Project, zone).Context(ctx).Do()
 	if err != nil {
 		return
 	}
@@ -74,6 +74,6 @@ func (s *server) updateZone(ctx context.Context, domains []string, ip, ipv6 stri
 		Deletions: deletions,
 	}
 
-	_, err = s.dnsService.Changes.Create(project, zone, change).Context(ctx).Do()
+	_, err = s.dnsService.Changes.Create(Project, zone, change).Context(ctx).Do()
 	return
 }

@@ -22,7 +22,7 @@ import (
 )
 
 func TestUpdateValidation(t *testing.T) {
-	srv := NewServer(nil)
+	srv := NewServer(nil, nil)
 	for name, tc := range map[string]struct {
 		url    string
 		status int

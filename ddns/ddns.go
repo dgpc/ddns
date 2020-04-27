@@ -24,6 +24,7 @@ import (
 
 	"ddns/third_party/netutil"
 
+	"cloud.google.com/go/datastore"
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
 	"google.golang.org/api/dns/v1"
@@ -31,12 +32,14 @@ import (
 
 type server struct {
 	dnsService *dns.Service
+	dsCli      *datastore.Client
 	Router     *mux.Router
 }
 
-func NewServer(dnsService *dns.Service) *server {
+func NewServer(dnsService *dns.Service, dsCli *datastore.Client) *server {
 	srv := &server{
 		dnsService: dnsService,
+		dsCli:      dsCli,
 	}
 
 	r := mux.NewRouter()
@@ -95,6 +98,8 @@ func (srv *server) UpdateHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for i, domain := range domains {
+		domain = netutil.AbsDomainName([]byte(domain))
+		domains[i] = domain
 		if !netutil.IsDomainName(domain) {
 			w.WriteHeader(http.StatusBadRequest)
 			fmt.Fprintf(w, "KO\n")
@@ -103,16 +108,24 @@ func (srv *server) UpdateHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-		domains[i] = netutil.AbsDomainName([]byte(domain))
-	}
 
-	if token != "hunter2" { // TODO: auth
-		w.WriteHeader(http.StatusUnauthorized)
-		fmt.Fprintf(w, "KO\n")
-		if verbose {
-			fmt.Fprintf(w, "token should be 'hunter2' 🙈\n")
+		auth, err := srv.authorized(r.Context(), domain, token)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprintf(w, "KO\n")
+			if verbose {
+				fmt.Fprintf(w, "unable to verify token: %v\n", err)
+			}
+			return
 		}
-		return
+		if !auth {
+			w.WriteHeader(http.StatusUnauthorized)
+			fmt.Fprintf(w, "KO\n")
+			if verbose {
+				fmt.Fprintf(w, "incorrect token for domain %q\n", domain)
+			}
+			return
+		}
 	}
 
 	if ip == "" && ipv6 == "" {

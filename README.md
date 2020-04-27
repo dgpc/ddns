@@ -19,7 +19,6 @@ This project is a work in progress. It is *definitely not production-ready*.
 Unfinished work includes:
 
 * Improving the Set-up instructions.
-* Implementing authentication.
 * Moving project/zone configuration to environment variables.
 * Supporting multiple users/zones.
 * Listening based on the `PORT` environment variable, rather than a constant `8080`.
