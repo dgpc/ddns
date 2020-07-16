@@ -11,11 +11,12 @@ soley by David Claridge, and not in association with his employment at Google.
 1. Create a Zone in Cloud DNS.
 1. Clone this GitHub repository.
 1. Change the `Project` and `zone` constants in `ddns/google.go`.
-1. Build using `docker build -t gcr.io/<project>/ddns-server:latest`.
+1. Build using `docker build -t gcr.io/<project>/ddns-server:latest .`.
 1. Push the image to GCR using `docker push gcr.io/<project>/ddns-server:latest`.
-1. Deploy the Cloud Run application `gcloud run deploy --image gcr.io/<project>/ddns-server:latest --platform managed` (be sure to allow unauthenticated requests).
-1. Create tokens for your domains using the utility in `cmd/adddomain`.
-1. Configure ddclient on your router to use the Cloud Run app's address.
+1. (optional) Create a service account with the roles "Cloud Datastore User" and "DNS Administrator". Pass that service account to the next command as `--service-account <custom-account>`.
+1. Deploy the Cloud Run application `gcloud run deploy --image gcr.io/<project>/ddns-server:latest --project <project> --platform managed --allow-unauthenticated`.
+1. Create tokens for your domains using: `go run ./cmd/adddomain`. The created token corresponds to the password to use in the next step.
+1. Configure the dynamic DNS client on your router to use the Cloud Run app's address. Specify any value as the username, if required, and the created token as the password.
 
 ## TODO
 
