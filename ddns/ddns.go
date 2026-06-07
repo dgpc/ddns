@@ -17,6 +17,7 @@
 package ddns
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -34,6 +35,11 @@ type server struct {
 	dnsService *dns.Service
 	dsCli      *datastore.Client
 	Router     *mux.Router
+
+	// Dependencies, overridable in tests. Default to the real
+	// implementations (see authorized / updateZone) in NewServer.
+	authorize func(ctx context.Context, domain, token string) (bool, error)
+	update    func(ctx context.Context, domains []string, ip, ipv6 string, clear bool) (err error, changed bool)
 }
 
 func NewServer(dnsService *dns.Service, dsCli *datastore.Client) *server {
@@ -41,6 +47,8 @@ func NewServer(dnsService *dns.Service, dsCli *datastore.Client) *server {
 		dnsService: dnsService,
 		dsCli:      dsCli,
 	}
+	srv.authorize = srv.authorized
+	srv.update = srv.updateZone
 
 	r := mux.NewRouter()
 	r.HandleFunc("/update", srv.UpdateHandler)
@@ -63,7 +71,38 @@ func any(ss ...string) string {
 	return ""
 }
 
+// isDyndns2 reports whether the request arrived on one of the dyndns2 protocol
+// endpoints. Clients such as ddclient expect those endpoints to answer with
+// dyndns2 status codes ("good"/"nochg"/"badauth"/...) rather than this server's
+// native OK/KO format, so they cannot understand a bare "OK" reply.
+func isDyndns2(r *http.Request) bool {
+	switch r.URL.Path {
+	case "/nic/update", "/dyn/dyndns.php":
+		return true
+	}
+	return false
+}
+
+// fail writes an error response in the dialect appropriate to the endpoint. On
+// dyndns2 endpoints the result is conveyed by a status code in the body with an
+// HTTP 200 (per the dyndns2 protocol); otherwise the native KO format is used,
+// preserving the optional verbose detail line.
+func fail(w http.ResponseWriter, dyndns2 bool, httpStatus int, dynCode, verboseMsg string, verbose bool) {
+	if dyndns2 {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "%s\n", dynCode)
+		return
+	}
+	w.WriteHeader(httpStatus)
+	fmt.Fprint(w, "KO\n")
+	if verbose {
+		fmt.Fprint(w, verboseMsg)
+	}
+}
+
 func (srv *server) UpdateHandler(w http.ResponseWriter, r *http.Request) {
+	dyndns2 := isDyndns2(r)
+
 	domain := any(r.FormValue("domains"), r.FormValue("hostname"))
 	token := r.FormValue("token")
 	if _, pass, ok := r.BasicAuth(); ok && token == "" {
@@ -89,11 +128,7 @@ func (srv *server) UpdateHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain")
 
 	if len(domains) == 0 {
-		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprintf(w, "KO\n")
-		if verbose {
-			fmt.Fprintf(w, "no domain(s) provided\n")
-		}
+		fail(w, dyndns2, http.StatusBadRequest, "notfqdn", "no domain(s) provided\n", verbose)
 		return
 	}
 
@@ -101,29 +136,20 @@ func (srv *server) UpdateHandler(w http.ResponseWriter, r *http.Request) {
 		domain = netutil.AbsDomainName([]byte(domain))
 		domains[i] = domain
 		if !netutil.IsDomainName(domain) {
-			w.WriteHeader(http.StatusBadRequest)
-			fmt.Fprintf(w, "KO\n")
-			if verbose {
-				fmt.Fprintf(w, "invalid domain: %q\n", domain)
-			}
+			fail(w, dyndns2, http.StatusBadRequest, "notfqdn",
+				fmt.Sprintf("invalid domain: %q\n", domain), verbose)
 			return
 		}
 
-		auth, err := srv.authorized(r.Context(), domain, token)
+		auth, err := srv.authorize(r.Context(), domain, token)
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprintf(w, "KO\n")
-			if verbose {
-				fmt.Fprintf(w, "unable to verify token: %v\n", err)
-			}
+			fail(w, dyndns2, http.StatusInternalServerError, "911",
+				fmt.Sprintf("unable to verify token: %v\n", err), verbose)
 			return
 		}
 		if !auth {
-			w.WriteHeader(http.StatusUnauthorized)
-			fmt.Fprintf(w, "KO\n")
-			if verbose {
-				fmt.Fprintf(w, "incorrect token for domain %q\n", domain)
-			}
+			fail(w, dyndns2, http.StatusUnauthorized, "badauth",
+				fmt.Sprintf("incorrect token for domain %q\n", domain), verbose)
 			return
 		}
 	}
@@ -132,11 +158,8 @@ func (srv *server) UpdateHandler(w http.ResponseWriter, r *http.Request) {
 		// Try to auto-detect client IP
 		ip = r.RemoteAddr
 		if ip == "" {
-			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprintf(w, "KO\n")
-			if verbose {
-				fmt.Fprintf(w, "unable to determine client IP address\n")
-			}
+			fail(w, dyndns2, http.StatusInternalServerError, "911",
+				"unable to determine client IP address\n", verbose)
 			return
 		}
 		if host, _, err := net.SplitHostPort(ip); err == nil {
@@ -148,12 +171,8 @@ func (srv *server) UpdateHandler(w http.ResponseWriter, r *http.Request) {
 		// Validate explicit IPv6 address
 		parsedIP := net.ParseIP(ipv6)
 		if parsedIP == nil {
-			// consider http.Error()
-			w.WriteHeader(http.StatusBadRequest)
-			fmt.Fprintf(w, "KO\n")
-			if verbose {
-				fmt.Fprintf(w, "invalid IP v6 address: %q\n", ipv6)
-			}
+			fail(w, dyndns2, http.StatusBadRequest, "dnserr",
+				fmt.Sprintf("invalid IP v6 address: %q\n", ipv6), verbose)
 			return
 		}
 	}
@@ -162,11 +181,8 @@ func (srv *server) UpdateHandler(w http.ResponseWriter, r *http.Request) {
 		// No explicit IPv6 addr, determine whether IP is v4 or v6.
 		parsedIP := net.ParseIP(ip)
 		if parsedIP == nil {
-			w.WriteHeader(http.StatusBadRequest)
-			fmt.Fprintf(w, "KO\n")
-			if verbose {
-				fmt.Fprintf(w, "invalid IP address: %q\n", ip)
-			}
+			fail(w, dyndns2, http.StatusBadRequest, "dnserr",
+				fmt.Sprintf("invalid IP address: %q\n", ip), verbose)
 			return
 		}
 		if parsedIP.To4() == nil {
@@ -175,18 +191,29 @@ func (srv *server) UpdateHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	err, changed := srv.updateZone(r.Context(), domains, ip, ipv6, clear)
+	err, changed := srv.update(r.Context(), domains, ip, ipv6, clear)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprintf(w, "KO\n")
-		if verbose {
-			fmt.Fprintf(w, "failed to update zone file: %v\n", err)
-		}
+		fail(w, dyndns2, http.StatusInternalServerError, "911",
+			fmt.Sprintf("failed to update zone file: %v\n", err), verbose)
 		return
 	}
 
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, "OK\n")
+	if dyndns2 {
+		// dyndns2 reports one status line per host: "good <ip>" when the record
+		// changed, "nochg <ip>" otherwise. Report whichever address was set.
+		status := "good"
+		if !changed {
+			status = "nochg"
+		}
+		addr := any(ip, ipv6)
+		for range domains {
+			fmt.Fprintf(w, "%s %s\n", status, addr)
+		}
+		return
+	}
+
+	fmt.Fprint(w, "OK\n")
 	if verbose {
 		fmt.Fprintf(w, "%s\n", ip)
 		fmt.Fprintf(w, "%s\n", ipv6)

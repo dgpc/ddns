@@ -33,40 +33,57 @@ func (s *server) updateZone(ctx context.Context, domains []string, ip, ipv6 stri
 		return
 	}
 
+	// Index existing A/AAAA records by name and type for quick lookup.
+	existing := map[string]map[string]*dns.ResourceRecordSet{}
+	for _, rrset := range resp.Rrsets {
+		if rrset.Type != "A" && rrset.Type != "AAAA" {
+			continue
+		}
+		if existing[rrset.Name] == nil {
+			existing[rrset.Name] = map[string]*dns.ResourceRecordSet{}
+		}
+		existing[rrset.Name][rrset.Type] = rrset
+	}
+
 	additions := []*dns.ResourceRecordSet{}
 	deletions := []*dns.ResourceRecordSet{}
 
+	// reconcile records the minimal change to make name/typ resolve to value.
+	// It only marks changed (and emits additions/deletions) when the record is
+	// actually out of date, so an unchanged update is a no-op (-> "nochg").
+	reconcile := func(name, typ, value string) {
+		cur := existing[name][typ]
+		if clear || value == "" {
+			// Only remove the record on an explicit clear request.
+			if clear && cur != nil {
+				deletions = append(deletions, cur)
+				changed = true
+			}
+			return
+		}
+		if cur != nil && len(cur.Rrdatas) == 1 && cur.Rrdatas[0] == value && cur.Ttl == 300 {
+			return // already correct
+		}
+		if cur != nil {
+			deletions = append(deletions, cur)
+		}
+		additions = append(additions, &dns.ResourceRecordSet{
+			Type:    typ,
+			Name:    name,
+			Rrdatas: []string{value},
+			Ttl:     300,
+		})
+		changed = true
+	}
+
 	for _, domain := range domains {
-		for _, rrset := range resp.Rrsets {
-			if rrset.Name == domain && rrset.Type == "A" && (clear || ip != "") {
-				deletions = append(deletions, rrset)
-				changed = true
-			}
-			if rrset.Name == domain && rrset.Type == "AAAA" && (clear || ipv6 != "") {
-				deletions = append(deletions, rrset)
-				changed = true
-			}
-		}
+		reconcile(domain, "A", ip)
+		reconcile(domain, "AAAA", ipv6)
+	}
 
-		if !clear && ip != "" {
-			additions = append(additions, &dns.ResourceRecordSet{
-				Type:    "A",
-				Name:    domain,
-				Rrdatas: []string{ip},
-				Ttl:     300,
-			})
-			changed = true
-		}
-
-		if !clear && ipv6 != "" {
-			additions = append(additions, &dns.ResourceRecordSet{
-				Type:    "AAAA",
-				Name:    domain,
-				Rrdatas: []string{ipv6},
-				Ttl:     300,
-			})
-			changed = true
-		}
+	if !changed {
+		// Nothing to do; Cloud DNS rejects an empty change set.
+		return nil, false
 	}
 
 	change := &dns.Change{
@@ -75,5 +92,5 @@ func (s *server) updateZone(ctx context.Context, domains []string, ip, ipv6 stri
 	}
 
 	_, err = s.dnsService.Changes.Create(Project, zone, change).Context(ctx).Do()
-	return
+	return err, changed
 }

@@ -17,12 +17,27 @@
 package ddns
 
 import (
+	"context"
 	"net/http/httptest"
 	"testing"
 )
 
-func TestUpdateValidation(t *testing.T) {
+// testServer returns a server whose datastore/DNS dependencies are replaced
+// with in-memory fakes, so handler behaviour can be tested without GCP. The
+// fake accepts the token "hunter2" and reports every update as a change.
+func testServer(changed bool) *server {
 	srv := NewServer(nil, nil)
+	srv.authorize = func(ctx context.Context, domain, token string) (bool, error) {
+		return token == "hunter2", nil
+	}
+	srv.update = func(ctx context.Context, domains []string, ip, ipv6 string, clear bool) (error, bool) {
+		return nil, changed
+	}
+	return srv
+}
+
+func TestUpdateValidation(t *testing.T) {
+	srv := testServer(true)
 	for name, tc := range map[string]struct {
 		url    string
 		status int
@@ -56,5 +71,43 @@ func TestUpdateValidation(t *testing.T) {
 			}
 		})
 
+	}
+}
+
+// TestDyndns2Responses verifies the dyndns2 endpoints answer with the protocol
+// status codes that clients like ddclient understand, rather than OK/KO.
+func TestDyndns2Responses(t *testing.T) {
+	for name, tc := range map[string]struct {
+		url      string
+		bascPass string // if set, sent as HTTP Basic auth password (how ddclient authenticates)
+		changed  bool
+		want     string
+	}{
+		"good":          {"https://ddns.c6e.me/nic/update?hostname=c6e.me&token=hunter2&myip=127.0.0.1", "", true, "good 127.0.0.1\n"},
+		"nochg":         {"https://ddns.c6e.me/nic/update?hostname=c6e.me&token=hunter2&myip=127.0.0.1", "", false, "nochg 127.0.0.1\n"},
+		"good-ipv6":     {"https://ddns.c6e.me/nic/update?hostname=c6e.me&token=hunter2&myip=::1", "", true, "good ::1\n"},
+		"basic-auth":    {"https://ddns.c6e.me/nic/update?hostname=c6e.me&myip=127.0.0.1", "hunter2", true, "good 127.0.0.1\n"},
+		"badauth":       {"https://ddns.c6e.me/nic/update?hostname=c6e.me&token=wrong&myip=127.0.0.1", "", true, "badauth\n"},
+		"notfqdn":       {"https://ddns.c6e.me/nic/update?hostname=c$e.me&token=hunter2&myip=127.0.0.1", "", true, "notfqdn\n"},
+		"dyndns-php":    {"https://ddns.c6e.me/dyn/dyndns.php?hostname=c6e.me&token=hunter2&myip=127.0.0.1", "", true, "good 127.0.0.1\n"},
+		"multi-domains": {"https://ddns.c6e.me/nic/update?hostname=c6e.me,daave.com&token=hunter2&myip=127.0.0.1", "", true, "good 127.0.0.1\ngood 127.0.0.1\n"},
+	} {
+		tc := tc
+		t.Run(name, func(t *testing.T) {
+			srv := testServer(tc.changed)
+			req := httptest.NewRequest("GET", tc.url, nil)
+			if tc.bascPass != "" {
+				req.SetBasicAuth("c6e", tc.bascPass)
+			}
+			w := httptest.NewRecorder()
+			srv.Router.ServeHTTP(w, req)
+			// dyndns2 always responds 200; the result is in the body.
+			if got := w.Result().StatusCode; got != 200 {
+				t.Errorf("unexpected status code, got %d, want 200", got)
+			}
+			if got := w.Body.String(); got != tc.want {
+				t.Errorf("unexpected body, got %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
